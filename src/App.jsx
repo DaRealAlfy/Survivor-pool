@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ref, onValue, set as fbSet } from "firebase/database";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInAnonymously, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
-import { Plus, Trash2, DollarSign, Check, X, Lock, Unlock, Flame, TrendingDown, BarChart3, ExternalLink, RefreshCw, Loader2, ChevronDown, Skull, Eye, EyeOff, Swords, Clock } from "lucide-react";
+import { Plus, Trash2, DollarSign, Check, X, Lock, Unlock, Flame, TrendingDown, BarChart3, ExternalLink, RefreshCw, Loader2, ChevronDown, Skull, Eye, EyeOff, Swords, Clock, Pencil } from "lucide-react";
 
 const WEEKS = Array.from({ length: 18 }, (_, i) => i + 1);
 const BUY_IN = 50;
@@ -62,6 +62,65 @@ const TEAMS = [
 ];
 const TEAM_MAP = Object.fromEntries(TEAMS.map((t) => [t.abbr, t]));
 
+const DEFAULT_TEXT = {
+  heroTitle: "Survivor Pool",
+  heroSeason: "2026 Season",
+  membersTitle: "Members",
+  weeklyPicksTitle: "Weekly Picks",
+  weeklyPicksSub: "Other members' picks stay hidden (eye-off icon) until that week's games start, then reveal automatically for everyone. Your own row is always visible to you.",
+  headToHeadTitle: "Head-to-Head",
+  headToHeadSub: "Flags weeks where two members picked teams that are playing each other — those cells get a gold outline in the grid above.",
+  poolStatsTitle: "Pool Stats",
+  winPctTitle: "Reference Win %",
+};
+
+function EditableText({ value, onSave, tag = "span", className = "", editable, multiline = false }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  if (!editable) {
+    const Tag = tag;
+    return <Tag className={className}>{value}</Tag>;
+  }
+
+  if (editing) {
+    const commit = () => {
+      setEditing(false);
+      if (draft.trim() && draft !== value) onSave(draft.trim());
+    };
+    return multiline ? (
+      <textarea
+        className={`sp-edit-input sp-edit-multiline ${className}`}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        autoFocus
+        rows={2}
+      />
+    ) : (
+      <input
+        className={`sp-edit-input ${className}`}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+        autoFocus
+      />
+    );
+  }
+
+  const Tag = tag;
+  return (
+    <Tag className={`sp-editable ${className}`} onClick={() => setEditing(true)} title="Click to edit this text">
+      {value}
+      <Pencil size={tag === "h1" ? 15 : 11} className="sp-edit-pencil" />
+    </Tag>
+  );
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -107,6 +166,7 @@ export default function App() {
   const [teamStats, setTeamStats] = useState({});
   const [matchupsByWeek, setMatchupsByWeek] = useState({});
   const [weekOverrides, setWeekOverrides] = useState({});
+  const [siteText, setSiteText] = useState({});
   const [poolLoaded, setPoolLoaded] = useState(false);
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -120,6 +180,8 @@ export default function App() {
   const [checkMsg, setCheckMsg] = useState({});
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
+  const [syncingPct, setSyncingPct] = useState(false);
+  const [syncPctMsg, setSyncPctMsg] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -127,9 +189,9 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
 
-    const hostUnlocked = !!user && !user.isAnonymous;
+  const hostUnlocked = !!user && !user.isAnonymous;
 
-    useEffect(() => {
+  useEffect(() => {
     const poolRef = ref(db, "pool");
     const unsub = onValue(poolRef, (snap) => {
       const val = snap.val() || {};
@@ -143,20 +205,19 @@ export default function App() {
       setTeamStats(val.teamStats || {});
       setMatchupsByWeek(val.matchupsByWeek || {});
       setWeekOverrides(val.weekOverrides || {});
+      setSiteText(val.siteText || {});
       setPoolLoaded(true);
     });
     return () => unsub();
   }, []);
 
-    useEffect(() => {
+  useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (u) {
         setUser(u);
         setAuthChecked(true);
         if (!u.isAnonymous) setMemberSession(null);
       } else {
-        // Nobody signed in yet (first load, or just signed out as host) —
-        // sign in anonymously so regular visitors and team members can still save data.
         signInAnonymously(auth).catch((e) => {
           console.error("Anonymous sign-in failed", e);
           setAuthChecked(true);
@@ -182,6 +243,15 @@ export default function App() {
     setWeekOverrides(next);
     fbSet(ref(db, "pool/weekOverrides"), next).catch((e) => console.error("write failed", e));
   }, []);
+  const pushSiteText = useCallback(
+    (key, value) => {
+      const next = { ...siteText, [key]: value };
+      setSiteText(next);
+      fbSet(ref(db, "pool/siteText"), next).catch((e) => console.error("write failed", e));
+    },
+    [siteText]
+  );
+  const getText = useCallback((key) => siteText[key] ?? DEFAULT_TEXT[key], [siteText]);
 
   const effectiveLocked = useCallback(
     (week) => {
@@ -442,6 +512,52 @@ export default function App() {
     }
   }
 
+  // ---- pull current win% for every team from ESPN's public standings endpoint ----
+  async function syncWinPct() {
+    setSyncingPct(true);
+    setSyncPctMsg("");
+    try {
+      const url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/standings?season=2026";
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("Bad response " + resp.status);
+      const data = await resp.json();
+      const next = { ...teamStats };
+      let updated = 0;
+      const groups = (data.children && data.children.length > 0) ? data.children : [{ standings: data.standings }];
+      for (const group of groups) {
+        const entries = group.standings?.entries || [];
+        for (const entry of entries) {
+          const abbr = entry.team?.abbreviation;
+          if (!abbr) continue;
+          const stats = entry.stats || [];
+          let pct = stats.find((s) => s.name === "winPercent" || s.abbreviation === "PCT")?.value;
+          if (typeof pct !== "number") {
+            const wins = stats.find((s) => s.name === "wins")?.value;
+            const losses = stats.find((s) => s.name === "losses")?.value;
+            const ties = stats.find((s) => s.name === "ties")?.value || 0;
+            if (typeof wins === "number" && typeof losses === "number" && wins + losses + ties > 0) {
+              pct = (wins + ties * 0.5) / (wins + losses + ties);
+            }
+          }
+          if (typeof pct === "number") {
+            next[abbr] = pct;
+            updated += 1;
+          }
+        }
+      }
+      if (updated === 0) {
+        setSyncPctMsg("Couldn't find any team records in that response — try again later, or enter them manually below.");
+      } else {
+        pushTeamStats(next);
+        setSyncPctMsg(`Synced win % for ${updated} teams. Early in the season these may still be 0-0 for everyone.`);
+      }
+    } catch (e) {
+      setSyncPctMsg("Couldn't reach standings from here — try again later, or enter them manually below.");
+    } finally {
+      setSyncingPct(false);
+    }
+  }
+
   function openScoreboard(week) {
     window.open(`https://www.espn.com/nfl/scoreboard/_/week/${week}/year/2026/seasontype/2`, "_blank", "noopener,noreferrer");
   }
@@ -506,6 +622,8 @@ export default function App() {
         .sp-col-check { padding-bottom: 6px; }
         .sp-sticky-name { position: sticky; left: 0; z-index: 2; background: var(--surface-2); padding: 10px 14px; min-width: 168px; text-align: left; border-right: 1px solid var(--line); }
         .sp-sticky-name-cell { position: sticky; left: 0; z-index: 1; background: var(--surface); padding: 10px 14px; border-right: 1px solid var(--line); }
+        table.sp-grid tbody tr:nth-child(even) .sp-sticky-name-cell { background: #1A2C21; }
+        table.sp-grid tbody tr:nth-child(even) td.sp-cell:not(.locked) { background: rgba(255,255,255,0.025); }
         .sp-row-eliminated .sp-sticky-name-cell { background: #17251D; }
         .sp-row-mine .sp-sticky-name-cell { background: #22301F; }
         .sp-member-cell-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; }
@@ -564,6 +682,11 @@ export default function App() {
         .sp-pin-error { color: var(--danger); font-size: 12.5px; margin-bottom: 8px; }
         .sp-pin-note { color: var(--text-dim); font-size: 11.5px; margin-top: 12px; line-height: 1.5; }
         .sp-select { width: 100%; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; outline: none; margin-bottom: 10px; }
+        .sp-editable { cursor: pointer; border-radius: 4px; }
+        .sp-editable:hover { background: rgba(232,178,61,0.12); }
+        .sp-edit-pencil { display: inline; vertical-align: middle; opacity: 0.5; margin-left: 6px; }
+        .sp-edit-input { background: var(--surface-2); border: 1px solid var(--gold-dim); border-radius: 6px; color: var(--text); font-family: inherit; padding: 4px 8px; width: 100%; max-width: 480px; outline: none; }
+        .sp-edit-multiline { max-width: 100%; resize: vertical; font-size: 14px; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
 
@@ -589,8 +712,8 @@ export default function App() {
 
             <div className="sp-hero">
               <div>
-                <div className="sp-title">2026 Season</div>
-                <h1 className="sp-h1 sp-display">Survivor Pool</h1>
+                <EditableText tag="div" className="sp-title" value={getText("heroSeason")} onSave={(v) => pushSiteText("heroSeason", v)} editable={hostUnlocked} />
+                <EditableText tag="h1" className="sp-h1 sp-display" value={getText("heroTitle")} onSave={(v) => pushSiteText("heroTitle", v)} editable={hostUnlocked} />
                 <div className="sp-sub">{members.length} member{members.length === 1 ? "" : "s"} · {aliveCount} still alive · ${BUY_IN} buy-in</div>
               </div>
               <div className="sp-pot">
@@ -601,7 +724,7 @@ export default function App() {
             </div>
 
             <div className="sp-panel">
-              <div className="sp-panel-head"><div className="sp-panel-title sp-display">Members</div></div>
+              <div className="sp-panel-head"><EditableText tag="div" className="sp-panel-title sp-display" value={getText("membersTitle")} onSave={(v) => pushSiteText("membersTitle", v)} editable={hostUnlocked} /></div>
               {hostUnlocked && (
                 <div className="sp-add-row">
                   <input className="sp-input" style={{ flex: 1 }} placeholder="Add a member's name…" value={newName}
@@ -646,7 +769,7 @@ export default function App() {
             </div>
 
             <div className="sp-panel">
-              <div className="sp-panel-head"><div className="sp-panel-title sp-display">Weekly Picks</div></div>
+              <div className="sp-panel-head"><EditableText tag="div" className="sp-panel-title sp-display" value={getText("weeklyPicksTitle")} onSave={(v) => pushSiteText("weeklyPicksTitle", v)} editable={hostUnlocked} /></div>
               {members.length === 0 ? (
                 <div className="sp-empty">Add members to start making picks.</div>
               ) : (
@@ -746,7 +869,7 @@ export default function App() {
                 </div>
               )}
               <div className="sp-sub" style={{ marginTop: 12 }}>
-                Other members' picks stay hidden (eye-off icon) until that week's games start, then reveal automatically for everyone. Your own row is always visible to you.{" "}
+                <EditableText tag="span" value={getText("weeklyPicksSub")} onSave={(v) => pushSiteText("weeklyPicksSub", v)} editable={hostUnlocked} multiline />{" "}
                 {hostUnlocked && "The clock icon is a manual override — click to force that week locked or unlocked regardless of kickoff time, click again to hand it back to automatic."}{" "}
                 <span className="sp-btn-ghost sp-btn sp-btn-sm" style={{ display: "inline-flex", marginLeft: 4 }} onClick={() => openScoreboard(1)}><ExternalLink size={12} /> open scoreboard</span>
               </div>
@@ -754,13 +877,13 @@ export default function App() {
 
             <div className="sp-panel">
               <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setVsOpen((v) => !v)}>
-                <div className="sp-panel-title sp-display"><Swords size={17} /> Head-to-Head</div>
+                <div className="sp-panel-title sp-display"><Swords size={17} /> <EditableText tag="span" value={getText("headToHeadTitle")} onSave={(v) => pushSiteText("headToHeadTitle", v)} editable={hostUnlocked} /></div>
                 <ChevronDown size={16} style={{ transform: vsOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
               </div>
               {vsOpen && (
                 <>
                   <div className="sp-sub" style={{ marginBottom: 12 }}>
-                    Flags weeks where two members picked teams that are playing each other — those cells get a gold outline in the grid above.{" "}
+                    <EditableText tag="span" value={getText("headToHeadSub")} onSave={(v) => pushSiteText("headToHeadSub", v)} editable={hostUnlocked} multiline />{" "}
                     {hostUnlocked && (
                       <span className="sp-btn-ghost sp-btn sp-btn-sm" style={{ display: "inline-flex", marginLeft: 4 }} onClick={syncSchedule} disabled={syncing}>
                         {syncing ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={12} />} Sync schedule
@@ -794,7 +917,7 @@ export default function App() {
 
             <div className="sp-panel">
               <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setStatsOpen((v) => !v)}>
-                <div className="sp-panel-title sp-display"><BarChart3 size={17} /> Pool Stats</div>
+                <div className="sp-panel-title sp-display"><BarChart3 size={17} /> <EditableText tag="span" value={getText("poolStatsTitle")} onSave={(v) => pushSiteText("poolStatsTitle", v)} editable={hostUnlocked} /></div>
                 <ChevronDown size={16} style={{ transform: statsOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
               </div>
               {statsOpen && (
@@ -817,11 +940,20 @@ export default function App() {
 
             <div className="sp-panel">
               <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setWinPctOpen((v) => !v)}>
-                <div className="sp-panel-title sp-display">Reference Win %</div>
+                <EditableText tag="div" className="sp-panel-title sp-display" value={getText("winPctTitle")} onSave={(v) => pushSiteText("winPctTitle", v)} editable={hostUnlocked} />
                 <ChevronDown size={16} style={{ transform: winPctOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
               </div>
               {winPctOpen && (
-                <div className="sp-pct-grid">
+                <>
+                  {hostUnlocked && (
+                    <div className="sp-sub" style={{ marginBottom: 12 }}>
+                      <span className="sp-btn-ghost sp-btn sp-btn-sm" style={{ display: "inline-flex" }} onClick={syncWinPct} disabled={syncingPct}>
+                        {syncingPct ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={12} />} Sync win %
+                      </span>
+                    </div>
+                  )}
+                  {syncPctMsg && <div className="sp-check-msg info" style={{ marginBottom: 10 }}>{syncPctMsg}</div>}
+                  <div className="sp-pct-grid">
                   {TEAMS.map((t) => (
                     <div className="sp-pct-item" key={t.abbr}>
                       <TeamChip abbr={t.abbr} size="sm" />
@@ -837,6 +969,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                </>
               )}
             </div>
           </>
