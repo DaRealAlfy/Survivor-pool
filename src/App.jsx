@@ -129,11 +129,17 @@ export default function App() {
 
   const hostUnlocked = !!user;
 
-  useEffect(() => {
+    useEffect(() => {
     const poolRef = ref(db, "pool");
     const unsub = onValue(poolRef, (snap) => {
       const val = snap.val() || {};
-      setMembers(val.members || []);
+      const rawMembers = Array.isArray(val.members) ? val.members : Object.values(val.members || {});
+      const normalizedMembers = rawMembers.map((m) => ({
+        ...m,
+        picks: m && m.picks ? m.picks : {},
+        passcode: m && m.passcode ? m.passcode : null,
+      }));
+      setMembers(normalizedMembers);
       setTeamStats(val.teamStats || {});
       setMatchupsByWeek(val.matchupsByWeek || {});
       setWeekOverrides(val.weekOverrides || {});
