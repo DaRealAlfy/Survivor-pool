@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ref, onValue, set as fbSet } from "firebase/database";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInAnonymously, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
 import { Plus, Trash2, DollarSign, Check, X, Lock, Unlock, Flame, TrendingDown, BarChart3, ExternalLink, RefreshCw, Loader2, ChevronDown, Skull, Eye, EyeOff, Swords, Clock } from "lucide-react";
 
@@ -127,7 +127,7 @@ export default function App() {
   const [loginError, setLoginError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
 
-  const hostUnlocked = !!user;
+    const hostUnlocked = !!user && !user.isAnonymous;
 
     useEffect(() => {
     const poolRef = ref(db, "pool");
@@ -148,11 +148,20 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  useEffect(() => {
+    useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthChecked(true);
-      if (u) setMemberSession(null);
+      if (u) {
+        setUser(u);
+        setAuthChecked(true);
+        if (!u.isAnonymous) setMemberSession(null);
+      } else {
+        // Nobody signed in yet (first load, or just signed out as host) —
+        // sign in anonymously so regular visitors and team members can still save data.
+        signInAnonymously(auth).catch((e) => {
+          console.error("Anonymous sign-in failed", e);
+          setAuthChecked(true);
+        });
+      }
     });
     return () => unsub();
   }, []);
