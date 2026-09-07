@@ -780,8 +780,8 @@ export default function App() {
                     const st = statuses[m.id];
                     return (
                       <div className="sp-member-row" key={m.id}>
-                        {hostUnlocked ? (
-                          <input className="sp-member-name" value={m.name} onChange={(e) => renameMember(m.id, e.target.value)} />
+                                                {(hostUnlocked || memberSession === m.id) ? (
+                          <input className="sp-member-name" value={m.name} onChange={(e) => renameMember(m.id, e.target.value)} title={memberSession === m.id && !hostUnlocked ? "You can rename your own team" : undefined} />
                         ) : (
                           <div className="sp-member-name" style={{ cursor: "default" }}>{m.name}</div>
                         )}
