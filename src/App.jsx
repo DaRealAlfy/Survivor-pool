@@ -67,7 +67,7 @@ const DEFAULT_TEXT = {
   heroSeason: "2026 Season",
   membersTitle: "Members",
   weeklyPicksTitle: "Weekly Picks",
-  weeklyPicksSub: "Other members' picks stay hidden (eye-off icon) until that week's games start, then reveal automatically for everyone. Your own row is always visible to you.",
+  weeklyPicksSub: "Other members' picks stay hidden (eye-off icon) until that specific team's game kicks off — then that one pick reveals for everyone, even if other games that week haven't started yet. Your own row is always visible to you.",
   headToHeadTitle: "Head-to-Head",
   headToHeadSub: "Flags weeks where two members picked teams that are playing each other — those cells get a gold outline in the grid above.",
   poolStatsTitle: "Pool Stats",
@@ -253,14 +253,51 @@ export default function App() {
   );
   const getText = useCallback((key) => siteText[key] ?? DEFAULT_TEXT[key], [siteText]);
 
-  const effectiveLocked = useCallback(
+  // ---- per-team kickoff lock: each pick reveals/locks when THAT team's game starts, not a fixed weekly time ----
+  const kickoffByWeek = useMemo(() => {
+    const map = {};
+    for (const [wStr, pairs] of Object.entries(matchupsByWeek)) {
+      const w = Number(wStr);
+      map[w] = {};
+      for (const pair of pairs || []) {
+        if (Array.isArray(pair) || !pair.date) continue; // old synced format had no kickoff time — falls back below
+        const ts = new Date(pair.date).getTime();
+        if (!ts) continue;
+        if (pair.home) map[w][pair.home] = ts;
+        if (pair.away) map[w][pair.away] = ts;
+      }
+    }
+    return map;
+  }, [matchupsByWeek]);
+
+  const hasScheduleForWeek = useCallback((week) => Object.keys(kickoffByWeek[week] || {}).length > 0, [kickoffByWeek]);
+
+  // Is THIS team's pick, for this week, locked? Host override always wins; otherwise use the
+  // real kickoff time if we've synced it; otherwise fall back to the old Sunday-1pm-ET estimate.
+  const pickLockedForTeam = useCallback(
+    (week, teamAbbr) => {
+      const ov = weekOverrides[week];
+      if (ov === "locked") return true;
+      if (ov === "unlocked") return false;
+      const kickoff = kickoffByWeek[week]?.[teamAbbr];
+      if (kickoff) return Date.now() >= kickoff;
+      return isWeekLockedByTime(week);
+    },
+    [weekOverrides, kickoffByWeek]
+  );
+
+  // Whole-week indicator for the header icon only — true once every synced game that week has
+  // kicked off (or, with no schedule synced, once the Sunday-1pm-ET estimate has passed).
+  const weekAppearsLocked = useCallback(
     (week) => {
       const ov = weekOverrides[week];
       if (ov === "locked") return true;
       if (ov === "unlocked") return false;
+      const teams = Object.keys(kickoffByWeek[week] || {});
+      if (teams.length > 0) return teams.every((abbr) => Date.now() >= kickoffByWeek[week][abbr]);
       return isWeekLockedByTime(week);
     },
-    [weekOverrides]
+    [weekOverrides, kickoffByWeek]
   );
 
   function cycleWeekOverride(week) {
@@ -276,10 +313,10 @@ export default function App() {
     (member, week) => {
       const pick = member.picks[week];
       if (!pick) return null;
-      if (hostUnlocked || memberSession === member.id || effectiveLocked(week)) return pick;
+      if (hostUnlocked || memberSession === member.id || pickLockedForTeam(week, pick.team)) return pick;
       return "hidden";
     },
-    [hostUnlocked, memberSession, effectiveLocked]
+    [hostUnlocked, memberSession, pickLockedForTeam]
   );
 
   async function submitLogin() {
@@ -497,14 +534,17 @@ export default function App() {
         const pairs = [];
         for (const event of data.events || []) {
           const comp = event.competitions?.[0];
-          const abbrs = (comp?.competitors || []).map((c) => c.team?.abbreviation).filter(Boolean);
-          if (abbrs.length === 2) pairs.push(abbrs);
+          const competitors = comp?.competitors || [];
+          const home = competitors.find((c) => c.homeAway === "home")?.team?.abbreviation;
+          const away = competitors.find((c) => c.homeAway === "away")?.team?.abbreviation;
+          const date = event.date || comp?.date || null;
+          if (home && away) pairs.push({ home, away, date });
         }
         next[w] = pairs;
       }
       pushMatchups(next);
       const totalGames = Object.values(next).reduce((s, p) => s + p.length, 0);
-      setSyncMsg(`Synced ${totalGames} games across ${WEEKS.length} weeks.`);
+      setSyncMsg(`Synced ${totalGames} games with kickoff times across ${WEEKS.length} weeks. Picks will now lock and reveal individually as each team's game starts.`);
     } catch (e) {
       setSyncMsg("Couldn't reach the schedule from here — try again later.");
     } finally {
@@ -779,16 +819,18 @@ export default function App() {
                       <tr>
                         <th className="sp-sticky-name">Member</th>
                         {WEEKS.map((w) => {
-                          const locked = effectiveLocked(w);
+                          const locked = weekAppearsLocked(w);
                           const override = weekOverrides[w];
+                          const synced = hasScheduleForWeek(w);
                           const overrideTitle =
                             override === "locked" ? "Host-locked — click to unlock" :
                             override === "unlocked" ? "Host-unlocked — click to reset to automatic" :
-                            `Automatic — locks ${formatLockTime(w)} (click to override)`;
+                            synced ? "Automatic — each pick reveals the moment that team's game kicks off (click to override)" :
+                            `No schedule synced yet — estimating a flat ${formatLockTime(w)} lock for this week (click to override)`;
                           return (
                             <th className="sp-col-week" key={w}>
                               <div>W{w}</div>
-                              {locked && <div className="sp-week-lock" title={`Revealed ${formatLockTime(w)}`}><Lock size={10} /></div>}
+                              {locked && <div className="sp-week-lock" title="All games this week have kicked off"><Lock size={10} /></div>}
                               {hostUnlocked && (
                                 <div className="sp-col-check" style={{ display: "flex", gap: 3, justifyContent: "center" }}>
                                   <button className="sp-icon-btn" style={{ padding: 4 }} title={`Check week ${w} results live`} onClick={() => checkWeekLive(w)} disabled={checking === w}>
@@ -820,9 +862,14 @@ export default function App() {
                             </td>
                             {WEEKS.map((w) => {
                               const eliminatedLock = st.eliminated && w > st.eliminatedAtWeek;
-                              const timeLocked = effectiveLocked(w);
-                              const canEdit = (hostUnlocked || isOwner) && !timeLocked;
                               const vp = getVisiblePick(m, w);
+                              const canEditRow = hostUnlocked || isOwner;
+                              // A pick already made is only still editable if that specific team hasn't kicked off yet.
+                              const pickIsLocked = vp && vp !== "hidden" ? pickLockedForTeam(w, vp.team) : false;
+                              const canEditExisting = canEditRow && !pickIsLocked;
+                              // Opening the picker to make a NEW pick is always allowed for the row's owner/host —
+                              // the modal itself excludes teams whose games have already started.
+                              const canOpenNew = canEditRow && weekOverrides[w] !== "locked";
                               const isVs = vsCellKeys.has(`${m.id}-${w}`);
                               return (
                                 <td className={`sp-cell ${eliminatedLock ? "locked" : ""} ${isVs && !eliminatedLock ? "vs" : ""}`} key={w}>
@@ -834,8 +881,9 @@ export default function App() {
                                         <div className="sp-hidden-pick" title="Hidden until this team kicks off"><EyeOff size={13} /></div>
                                       ) : vp ? (
                                         <>
-                                          <span onClick={canEdit ? () => setPicker({ memberId: m.id, week: w }) : undefined}
-                                            style={{ cursor: canEdit ? "pointer" : "default", opacity: vp.result === "loss" ? 0.55 : 1, filter: vp.result === "loss" ? "grayscale(0.4)" : "none" }}>
+                                          <span onClick={canEditExisting ? () => setPicker({ memberId: m.id, week: w }) : undefined}
+                                            style={{ cursor: canEditExisting ? "pointer" : "default", opacity: vp.result === "loss" ? 0.55 : 1, filter: vp.result === "loss" ? "grayscale(0.4)" : "none" }}
+                                            title={pickIsLocked ? "This team has already kicked off — locked" : undefined}>
                                             <TeamChip abbr={vp.team} size="sm" />
                                           </span>
                                           {isVs && <Swords size={11} color="var(--gold)" />}
@@ -846,10 +894,10 @@ export default function App() {
                                             </div>
                                           )}
                                         </>
-                                      ) : canEdit ? (
+                                      ) : canOpenNew ? (
                                         <button className="sp-pick-empty" onClick={() => setPicker({ memberId: m.id, week: w })}>+</button>
                                       ) : (
-                                        <span style={{ color: "var(--text-dim)" }}>{timeLocked ? <Lock size={12} /> : "—"}</span>
+                                        <span style={{ color: "var(--text-dim)" }}>—</span>
                                       )}
                                     </div>
                                   )}
@@ -977,7 +1025,7 @@ export default function App() {
       </div>
 
       {picker && (hostUnlocked || memberSession === picker.memberId) && (
-        <TeamPickerModal picker={picker} members={members} onClose={() => setPicker(null)} onSelect={selectTeam} onClear={clearPick} />
+        <TeamPickerModal picker={picker} members={members} onClose={() => setPicker(null)} onSelect={selectTeam} onClear={clearPick} pickLockedForTeam={pickLockedForTeam} />
       )}
 
       {loginOpen && (
@@ -1055,7 +1103,7 @@ function TeamLoginModal({ members, onClose, onSubmit }) {
   );
 }
 
-function TeamPickerModal({ picker, members, onClose, onSelect, onClear }) {
+function TeamPickerModal({ picker, members, onClose, onSelect, onClear, pickLockedForTeam }) {
   const member = members.find((m) => m.id === picker.memberId);
   if (!member) return null;
   const used = new Set(Object.entries(member.picks).filter(([w]) => Number(w) !== picker.week).map(([, p]) => p.team));
@@ -1066,7 +1114,7 @@ function TeamPickerModal({ picker, members, onClose, onSelect, onClear }) {
         <div className="sp-modal-head">
           <div>
             <div className="sp-panel-title sp-display">{member.name} — Week {picker.week}</div>
-            <div className="sp-sub" style={{ marginTop: 2 }}>Grayed-out teams have already been used this season.</div>
+            <div className="sp-sub" style={{ marginTop: 2 }}>Grayed-out teams have already been used this season, or have already kicked off this week.</div>
           </div>
           <button className="sp-modal-close" onClick={onClose}><X size={18} /></button>
         </div>
@@ -1074,9 +1122,11 @@ function TeamPickerModal({ picker, members, onClose, onSelect, onClear }) {
           <div className="sp-team-grid">
             {TEAMS.map((t) => {
               const isUsed = used.has(t.abbr);
+              const isStarted = existing?.team !== t.abbr && pickLockedForTeam(picker.week, t.abbr);
+              const isDisabled = isUsed || isStarted;
               const fg = textColorFor(t.primary);
               return (
-                <button key={t.abbr} className={`sp-team-btn ${isUsed ? "used" : ""}`} style={{ background: t.primary, borderColor: t.secondary, color: fg }} disabled={isUsed} onClick={() => onSelect(member.id, picker.week, t.abbr)}>
+                <button key={t.abbr} className={`sp-team-btn ${isDisabled ? "used" : ""}`} style={{ background: t.primary, borderColor: t.secondary, color: fg }} disabled={isDisabled} title={isStarted && !isUsed ? "Already kicked off this week" : undefined} onClick={() => onSelect(member.id, picker.week, t.abbr)}>
                   {t.abbr}<small>{t.city} {t.name}</small>
                 </button>
               );
