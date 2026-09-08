@@ -2,7 +2,14 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ref, onValue, set as fbSet } from "firebase/database";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInAnonymously, signOut } from "firebase/auth";
 import { db, auth } from "./firebase";
-import { Plus, Trash2, DollarSign, Check, X, Lock, Unlock, Flame, TrendingDown, BarChart3, ExternalLink, RefreshCw, Loader2, ChevronDown, Skull, Eye, EyeOff, Swords, Clock, Pencil } from "lucide-react";
+import { Plus, Trash2, DollarSign, Check, X, Lock, Unlock, Flame, TrendingDown, BarChart3, ExternalLink, RefreshCw, Loader2, ChevronDown, Skull, Eye, EyeOff, Swords, Clock, Pencil, AlertTriangle, Trophy, Palette } from "lucide-react";
+
+const THEMES = {
+  turf: { name: "Turf", bgTop: "#163325", bg: "#0E1F17", surface: "#16281F", surface2: "#1D3327", line: "#2C4A3A", text: "#F3F1E7", textDim: "#9FB4A6", gold: "#E8B23D", goldDim: "#B9862A" },
+  midnight: { name: "Midnight", bgTop: "#152341", bg: "#0B1220", surface: "#131C2E", surface2: "#1A2740", line: "#2A3B5C", text: "#F0F3FA", textDim: "#93A3C2", gold: "#5B9BD5", goldDim: "#3E76AC" },
+  crimson: { name: "Crimson", bgTop: "#341418", bg: "#1F0E10", surface: "#2B1418", surface2: "#3A1B21", line: "#5C2A31", text: "#F7EDEC", textDim: "#C29B9C", gold: "#E8875D", goldDim: "#B9633E" },
+  charcoal: { name: "Charcoal", bgTop: "#1E1E1E", bg: "#121212", surface: "#1B1B1B", surface2: "#242424", line: "#3A3A3A", text: "#F1F1EE", textDim: "#A8A8A2", gold: "#D4AF37", goldDim: "#A6871F" },
+};
 
 const WEEKS = Array.from({ length: 18 }, (_, i) => i + 1);
 const BUY_IN = 50;
@@ -125,18 +132,22 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function computeStatus(member) {
+function computeStatus(member, weekPastDeadline) {
   let lives = 2;
   let eliminatedAtWeek = null;
+  let missedAtWeeks = [];
   for (const w of WEEKS) {
     if (eliminatedAtWeek !== null) break;
     const pick = member.picks[w];
-    if (pick && pick.result === "loss") {
+    const missedPick = !pick && weekPastDeadline(w);
+    const lost = (pick && pick.result === "loss") || missedPick;
+    if (lost) {
+      if (missedPick) missedAtWeeks.push(w);
       lives -= 1;
       if (lives <= 0) eliminatedAtWeek = w;
     }
   }
-  return { lives: Math.max(lives, 0), eliminatedAtWeek, eliminated: eliminatedAtWeek !== null };
+  return { lives: Math.max(lives, 0), eliminatedAtWeek, eliminated: eliminatedAtWeek !== null, missedAtWeeks };
 }
 
 function textColorFor(hex) {
@@ -167,6 +178,10 @@ export default function App() {
   const [matchupsByWeek, setMatchupsByWeek] = useState({});
   const [weekOverrides, setWeekOverrides] = useState({});
   const [siteText, setSiteText] = useState({});
+  const [lastSynced, setLastSynced] = useState({});
+  const [themeKey, setThemeKey] = useState("turf");
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [poolLoaded, setPoolLoaded] = useState(false);
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -175,6 +190,7 @@ export default function App() {
   const [picker, setPicker] = useState(null);
   const [statsOpen, setStatsOpen] = useState(true);
   const [vsOpen, setVsOpen] = useState(true);
+  const [pendingOpen, setPendingOpen] = useState(true);
   const [winPctOpen, setWinPctOpen] = useState(false);
   const [checking, setChecking] = useState(null);
   const [checkMsg, setCheckMsg] = useState({});
@@ -188,8 +204,17 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
+  const [, setTick] = useState(0);
 
   const hostUnlocked = !!user && !user.isAnonymous;
+  const theme = THEMES[themeKey] || THEMES.turf;
+
+  // Force a periodic re-render so time-based locks, reveals, and auto-losses stay accurate
+  // even if nobody's actively interacting with the page.
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 60000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const poolRef = ref(db, "pool");
@@ -206,6 +231,8 @@ export default function App() {
       setMatchupsByWeek(val.matchupsByWeek || {});
       setWeekOverrides(val.weekOverrides || {});
       setSiteText(val.siteText || {});
+      setLastSynced(val.lastSynced || {});
+      setThemeKey(val.theme || "turf");
       setPoolLoaded(true);
     });
     return () => unsub();
@@ -252,6 +279,22 @@ export default function App() {
     [siteText]
   );
   const getText = useCallback((key) => siteText[key] ?? DEFAULT_TEXT[key], [siteText]);
+  const pushLastSynced = useCallback(
+    (key, ts) => {
+      const next = { ...lastSynced, [key]: ts };
+      setLastSynced(next);
+      fbSet(ref(db, "pool/lastSynced"), next).catch((e) => console.error("write failed", e));
+    },
+    [lastSynced]
+  );
+  const pushTheme = useCallback((key) => {
+    setThemeKey(key);
+    fbSet(ref(db, "pool/theme"), key).catch((e) => console.error("write failed", e));
+  }, []);
+  function formatSyncedAt(ts) {
+    if (!ts) return null;
+    return new Date(ts).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  }
 
   // ---- per-team kickoff lock: each pick reveals/locks when THAT team's game starts, not a fixed weekly time ----
   const kickoffByWeek = useMemo(() => {
@@ -365,6 +408,10 @@ export default function App() {
   function deleteMember(id) {
     pushMembers(members.filter((x) => x.id !== id));
     if (memberSession === id) setMemberSession(null);
+    setConfirmDeleteId(null);
+  }
+  function requestDeleteMember(id) {
+    setConfirmDeleteId(id);
   }
   function renameMember(id, name) {
     pushMembers(members.map((x) => (x.id === id ? { ...x, name } : x)));
@@ -407,14 +454,26 @@ export default function App() {
 
   const statuses = useMemo(() => {
     const map = {};
-    for (const m of members) map[m.id] = computeStatus(m);
+    for (const m of members) map[m.id] = computeStatus(m, weekAppearsLocked);
     return map;
-  }, [members]);
+  }, [members, weekAppearsLocked]);
 
   const pot = members.length * BUY_IN;
   const paidCount = members.filter((m) => m.paid).length;
   const paidTotal = paidCount * BUY_IN;
   const aliveCount = members.filter((m) => !statuses[m.id]?.eliminated).length;
+  const champion = members.length > 1 && aliveCount === 1 ? members.find((m) => !statuses[m.id]?.eliminated) : null;
+  const wipeout = members.length > 0 && aliveCount === 0;
+
+  const currentWeek = useMemo(() => {
+    for (const w of WEEKS) if (!weekAppearsLocked(w)) return w;
+    return WEEKS[WEEKS.length - 1];
+  }, [weekAppearsLocked]);
+
+  const pendingMembers = useMemo(
+    () => members.filter((m) => !statuses[m.id]?.eliminated && !m.picks[currentWeek]),
+    [members, statuses, currentWeek]
+  );
 
   const teamPickCounts = useMemo(() => {
     const counts = {};
@@ -543,6 +602,7 @@ export default function App() {
         next[w] = pairs;
       }
       pushMatchups(next);
+      pushLastSynced("schedule", Date.now());
       const totalGames = Object.values(next).reduce((s, p) => s + p.length, 0);
       setSyncMsg(`Synced ${totalGames} games with kickoff times across ${WEEKS.length} weeks. Picks will now lock and reveal individually as each team's game starts.`);
     } catch (e) {
@@ -589,6 +649,7 @@ export default function App() {
         setSyncPctMsg("Couldn't find any team records in that response — try again later, or enter them manually below.");
       } else {
         pushTeamStats(next);
+        pushLastSynced("winPct", Date.now());
         setSyncPctMsg(`Synced win % for ${updated} teams. Early in the season these may still be 0-0 for everyone.`);
       }
     } catch (e) {
@@ -607,14 +668,27 @@ export default function App() {
   const loaded = poolLoaded && authChecked;
 
   return (
-    <div className="sp-root">
+    <div
+      className="sp-root"
+      style={{
+        "--bg": theme.bg,
+        "--bg-top": theme.bgTop,
+        "--surface": theme.surface,
+        "--surface-2": theme.surface2,
+        "--line": theme.line,
+        "--text": theme.text,
+        "--text-dim": theme.textDim,
+        "--gold": theme.gold,
+        "--gold-dim": theme.goldDim,
+      }}
+    >
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
         .sp-root {
           --bg: #0E1F17; --surface: #16281F; --surface-2: #1D3327; --surface-3: #24402F; --line: #2C4A3A;
           --text: #F3F1E7; --text-dim: #9FB4A6; --gold: #E8B23D; --gold-dim: #B9862A;
           --danger: #D9645B; --danger-dim: #7A2E29; --success: #5FB37F; --success-dim: #2D5B3D;
-          font-family: 'Inter', system-ui, sans-serif; background: radial-gradient(ellipse at top, #163325 0%, var(--bg) 55%);
+          font-family: 'Inter', system-ui, sans-serif; background: radial-gradient(ellipse at top, var(--bg-top) 0%, var(--bg) 55%);
           color: var(--text); min-height: 100vh; padding: 28px 20px 60px; box-sizing: border-box;
         }
         .sp-root * { box-sizing: border-box; }
@@ -623,6 +697,16 @@ export default function App() {
         .sp-hostbar { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
         .sp-readonly-badge { font-size: 11.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); padding: 5px 10px; border-radius: 20px; margin-right: auto; }
         .sp-hero { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 20px; border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 24px; }
+        .sp-theme-swatches { display: flex; align-items: center; gap: 6px; margin-right: 6px; }
+        .sp-theme-dot { width: 18px; height: 18px; border-radius: 50%; border: 2px solid; cursor: pointer; padding: 0; }
+        .sp-theme-dot.active { outline: 2px solid var(--gold); outline-offset: 2px; }
+        .sp-champion-banner {
+          display: flex; align-items: center; justify-content: center; gap: 10px;
+          background: linear-gradient(90deg, rgba(232,178,61,0.18), rgba(232,178,61,0.05));
+          border: 1px solid var(--gold-dim); color: var(--gold); border-radius: 12px;
+          padding: 16px; margin-bottom: 22px; font-family: 'Oswald', sans-serif; font-size: 20px; font-weight: 600; letter-spacing: 0.02em;
+        }
+        .sp-wipeout-banner { background: linear-gradient(90deg, rgba(217,100,91,0.18), rgba(217,100,91,0.05)); border-color: var(--danger-dim); color: var(--danger); }
         .sp-title { font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--gold); font-weight: 600; margin-bottom: 6px; }
         .sp-h1 { font-family: 'Oswald', sans-serif; font-size: 40px; font-weight: 700; line-height: 1; margin: 0; letter-spacing: 0.01em; }
         .sp-sub { color: var(--text-dim); font-size: 14px; margin-top: 6px; }
@@ -644,8 +728,10 @@ export default function App() {
         .sp-btn-sm { padding: 6px 11px; font-size: 12.5px; }
         .sp-members-list { display: flex; flex-direction: column; gap: 8px; }
         .sp-member-row { display: flex; align-items: center; gap: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; flex-wrap: wrap; }
+        .sp-member-name-wrap { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 90px; }
         .sp-member-name { background: transparent; border: none; color: var(--text); font-size: 14.5px; font-weight: 600; font-family: inherit; flex: 1; min-width: 90px; outline: none; border-bottom: 1px solid transparent; }
         .sp-member-name:focus { border-bottom: 1px solid var(--gold-dim); }
+        .sp-name-pencil { color: var(--text-dim); opacity: 0.6; flex-shrink: 0; }
         .sp-paid-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 5px 10px; border-radius: 20px; border: 1px solid var(--line); white-space: nowrap; user-select: none; }
         .sp-paid-yes { background: var(--success-dim); border-color: var(--success); color: #CFF0DA; }
         .sp-paid-no { background: var(--danger-dim); border-color: var(--danger); color: #F6D8D5; }
@@ -670,6 +756,7 @@ export default function App() {
         .sp-lives { display: flex; gap: 4px; margin-top: 4px; }
         .sp-life-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
         .sp-elim-tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--danger); margin-top: 4px; font-weight: 600; letter-spacing: 0.03em; }
+        .sp-missed-pick { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--danger); border: 1px solid var(--danger-dim); background: rgba(217,100,91,0.12); padding: 4px 7px; border-radius: 6px; font-family: 'Oswald', sans-serif; letter-spacing: 0.03em; }
         .sp-cell { text-align: center; padding: 8px 6px; border-left: 1px solid var(--line); vertical-align: middle; }
         .sp-cell.locked { background: repeating-linear-gradient(135deg, #101d16, #101d16 6px, #142117 6px, #142117 12px); }
         .sp-cell.vs { box-shadow: inset 0 0 0 2px var(--gold); background: rgba(232,178,61,0.09); }
@@ -692,6 +779,8 @@ export default function App() {
         .sp-bar-fill { height: 100%; background: var(--gold-dim); }
         .sp-stat-val { font-family: 'Oswald', sans-serif; font-size: 13px; color: var(--text-dim); min-width: 40px; text-align: right; }
         .sp-vs-week { margin-bottom: 12px; }
+        .sp-pending-list { display: flex; flex-wrap: wrap; gap: 8px; }
+        .sp-pending-chip { font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 20px; background: var(--danger-dim); border: 1px solid var(--danger); color: #F6D8D5; }
         .sp-vs-week:last-child { margin-bottom: 0; }
         .sp-vs-week-label { font-family: 'Oswald', sans-serif; font-size: 12.5px; color: var(--gold); margin-bottom: 6px; letter-spacing: 0.03em; }
         .sp-vs-row { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px; font-size: 13.5px; }
@@ -716,6 +805,7 @@ export default function App() {
         .sp-check-msg.success { color: var(--success); }
         .sp-check-msg.error { color: var(--danger); }
         .sp-check-msg.info { color: var(--text-dim); }
+        .sp-last-synced { font-size: 11px; color: var(--text-dim); margin-left: 10px; }
         .sp-loading { display: flex; align-items: center; justify-content: center; padding: 60px; color: var(--text-dim); gap: 10px; }
         .sp-pin-input { width: 100%; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--text); padding: 10px 12px; font-size: 15px; font-family: inherit; outline: none; margin-bottom: 10px; }
         .sp-pin-input:focus { border-color: var(--gold-dim); }
@@ -739,6 +829,14 @@ export default function App() {
               <div className="sp-readonly-badge">
                 {hostUnlocked ? (<><Unlock size={13} /> Host mode</>) : sessionMember ? (<><Eye size={13} /> Signed in as {sessionMember.name}</>) : (<><Eye size={13} /> Viewing live — read only</>)}
               </div>
+              {hostUnlocked && (
+                <div className="sp-theme-swatches" title="Change site color theme">
+                  <Palette size={13} color="var(--text-dim)" />
+                  {Object.entries(THEMES).map(([key, t]) => (
+                    <button key={key} className={`sp-theme-dot ${themeKey === key ? "active" : ""}`} style={{ background: t.bg, borderColor: t.gold }} title={t.name} onClick={() => pushTheme(key)} />
+                  ))}
+                </div>
+              )}
               {(hostUnlocked || memberSession) && (
                 <button className="sp-btn sp-btn-ghost sp-btn-sm" onClick={signOutAll}><Unlock size={13} /> Sign out</button>
               )}
@@ -763,48 +861,78 @@ export default function App() {
               </div>
             </div>
 
+            {champion && (
+              <div className="sp-champion-banner">
+                <Trophy size={22} /> <span>{champion.name} wins the pool!</span>
+              </div>
+            )}
+            {wipeout && !champion && (
+              <div className="sp-champion-banner sp-wipeout-banner">
+                <Skull size={20} /> <span>Everyone's been eliminated — no survivors this season.</span>
+              </div>
+            )}
+
             <div className="sp-panel">
-              <div className="sp-panel-head"><EditableText tag="div" className="sp-panel-title sp-display" value={getText("membersTitle")} onSave={(v) => pushSiteText("membersTitle", v)} editable={hostUnlocked} /></div>
-              {hostUnlocked && (
-                <div className="sp-add-row">
-                  <input className="sp-input" style={{ flex: 1 }} placeholder="Add a member's name…" value={newName}
-                    onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addMember()} />
-                  <button className="sp-btn" onClick={addMember}><Plus size={15} /> Add</button>
-                </div>
-              )}
-              {members.length === 0 ? (
-                <div className="sp-empty">No members yet{hostUnlocked ? " — add your first entrant above." : "."}</div>
-              ) : (
-                <div className="sp-members-list">
-                  {members.map((m) => {
-                    const st = statuses[m.id];
-                    return (
-                      <div className="sp-member-row" key={m.id}>
-                                                {(hostUnlocked || memberSession === m.id) ? (
-                          <input className="sp-member-name" value={m.name} onChange={(e) => renameMember(m.id, e.target.value)} title={memberSession === m.id && !hostUnlocked ? "You can rename your own team" : undefined} />
-                        ) : (
-                          <div className="sp-member-name" style={{ cursor: "default" }}>{m.name}</div>
-                        )}
-                        {st.eliminated && <span className="sp-elim-tag" style={{ marginTop: 0 }}><Skull size={12} /> Eliminated wk {st.eliminatedAtWeek}</span>}
-                        <span className="sp-login-badge">{m.passcode ? <Lock size={11} /> : <Unlock size={11} />} {m.passcode ? "Team login set" : "Not claimed yet"}</span>
-                        <div className={`sp-paid-toggle ${m.paid ? "sp-paid-yes" : "sp-paid-no"}`} onClick={hostUnlocked ? () => togglePaid(m.id) : undefined} style={{ cursor: hostUnlocked ? "pointer" : "default" }}>
-                          <DollarSign size={12} /> {m.paid ? "Paid" : "Unpaid"}
-                        </div>
-                        {hostUnlocked && (
-                          <>
-                            {m.passcode && <button className="sp-icon-btn" onClick={() => resetPasscode(m.id)} title="Reset this team's login so they can set a new one"><Unlock size={15} /></button>}
-                            <button className="sp-icon-btn" onClick={() => deleteMember(m.id)} title="Remove member"><Trash2 size={15} /></button>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {members.some((m) => !m.passcode) && (
-                <div className="sp-sub" style={{ marginTop: 10 }}>
-                  Members without a login yet can claim their team from "Team sign-in" above by picking their name and setting their own code.
-                </div>
+              <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setMembersOpen((v) => !v)}>
+                <EditableText tag="div" className="sp-panel-title sp-display" value={getText("membersTitle")} onSave={(v) => pushSiteText("membersTitle", v)} editable={hostUnlocked} />
+                <ChevronDown size={16} style={{ transform: membersOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+              </div>
+              {membersOpen && (
+                <>
+                  {hostUnlocked && (
+                    <div className="sp-add-row">
+                      <input className="sp-input" style={{ flex: 1 }} placeholder="Add a member's name…" value={newName}
+                        onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addMember()} />
+                      <button className="sp-btn" onClick={addMember}><Plus size={15} /> Add</button>
+                    </div>
+                  )}
+                  {members.length === 0 ? (
+                    <div className="sp-empty">No members yet{hostUnlocked ? " — add your first entrant above." : "."}</div>
+                  ) : (
+                    <div className="sp-members-list">
+                      {members.map((m) => {
+                        const st = statuses[m.id];
+                        const canRename = hostUnlocked || memberSession === m.id;
+                        const confirming = confirmDeleteId === m.id;
+                        return (
+                          <div className="sp-member-row" key={m.id}>
+                            {canRename ? (
+                              <span className="sp-member-name-wrap">
+                                <input className="sp-member-name" value={m.name} onChange={(e) => renameMember(m.id, e.target.value)} title={memberSession === m.id && !hostUnlocked ? "You can rename your own team" : undefined} />
+                                <Pencil size={11} className="sp-name-pencil" />
+                              </span>
+                            ) : (
+                              <div className="sp-member-name" style={{ cursor: "default" }}>{m.name}</div>
+                            )}
+                            {st.eliminated && <span className="sp-elim-tag" style={{ marginTop: 0 }}><Skull size={12} /> Eliminated wk {st.eliminatedAtWeek}</span>}
+                            <span className="sp-login-badge">{m.passcode ? <Lock size={11} /> : <Unlock size={11} />} {m.passcode ? "Team login set" : "Not claimed yet"}</span>
+                            <div className={`sp-paid-toggle ${m.paid ? "sp-paid-yes" : "sp-paid-no"}`} onClick={hostUnlocked ? () => togglePaid(m.id) : undefined} style={{ cursor: hostUnlocked ? "pointer" : "default" }}>
+                              <DollarSign size={12} /> {m.paid ? "Paid" : "Unpaid"}
+                            </div>
+                            {hostUnlocked && (
+                              <>
+                                {m.passcode && <button className="sp-icon-btn" onClick={() => resetPasscode(m.id)} title="Reset this team's login so they can set a new one"><Unlock size={15} /></button>}
+                                {confirming ? (
+                                  <span style={{ display: "flex", gap: 4 }}>
+                                    <button className="sp-btn sp-btn-ghost sp-btn-sm" style={{ color: "var(--danger)", borderColor: "var(--danger-dim)" }} onClick={() => deleteMember(m.id)}>Confirm delete</button>
+                                    <button className="sp-icon-btn" onClick={() => setConfirmDeleteId(null)} title="Cancel"><X size={15} /></button>
+                                  </span>
+                                ) : (
+                                  <button className="sp-icon-btn" onClick={() => requestDeleteMember(m.id)} title="Remove member"><Trash2 size={15} /></button>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {members.some((m) => !m.passcode) && (
+                    <div className="sp-sub" style={{ marginTop: 10 }}>
+                      Members without a login yet can claim their team from "Team sign-in" above by picking their name and setting their own code.
+                    </div>
+                  )}
+                </>
               )}
             </div>
 
@@ -867,9 +995,12 @@ export default function App() {
                               // A pick already made is only still editable if that specific team hasn't kicked off yet.
                               const pickIsLocked = vp && vp !== "hidden" ? pickLockedForTeam(w, vp.team) : false;
                               const canEditExisting = canEditRow && !pickIsLocked;
-                              // Opening the picker to make a NEW pick is always allowed for the row's owner/host —
-                              // the modal itself excludes teams whose games have already started.
-                              const canOpenNew = canEditRow && weekOverrides[w] !== "locked";
+                              const weekClosed = weekAppearsLocked(w); // every game that week has kicked off (or fallback estimate passed)
+                              const forceUnlocked = weekOverrides[w] === "unlocked";
+                              // Once every game that week has started, a member can no longer make a fresh pick —
+                              // unless the host has explicitly forced this week back open.
+                              const canOpenNew = canEditRow && (forceUnlocked || !weekClosed);
+                              const missedPick = !m.picks[w] && weekClosed && !forceUnlocked && !eliminatedLock;
                               const isVs = vsCellKeys.has(`${m.id}-${w}`);
                               return (
                                 <td className={`sp-cell ${eliminatedLock ? "locked" : ""} ${isVs && !eliminatedLock ? "vs" : ""}`} key={w}>
@@ -894,6 +1025,10 @@ export default function App() {
                                             </div>
                                           )}
                                         </>
+                                      ) : missedPick ? (
+                                        <span className="sp-missed-pick" title="No pick was made before this week's games started — counted as a loss">
+                                          <AlertTriangle size={10} /> Missed
+                                        </span>
                                       ) : canOpenNew ? (
                                         <button className="sp-pick-empty" onClick={() => setPicker({ memberId: m.id, week: w })}>+</button>
                                       ) : (
@@ -923,6 +1058,26 @@ export default function App() {
               </div>
             </div>
 
+            {members.length > 0 && (
+              <div className="sp-panel">
+                <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setPendingOpen((v) => !v)}>
+                  <div className="sp-panel-title sp-display">Who Hasn't Picked — Week {currentWeek}</div>
+                  <ChevronDown size={16} style={{ transform: pendingOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                </div>
+                {pendingOpen && (
+                  pendingMembers.length === 0 ? (
+                    <div className="sp-empty">Everyone still alive has picked for week {currentWeek}. ✅</div>
+                  ) : (
+                    <div className="sp-pending-list">
+                      {pendingMembers.map((m) => (
+                        <span key={m.id} className="sp-pending-chip">{m.name}</span>
+                      ))}
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+
             <div className="sp-panel">
               <div className="sp-panel-head" style={{ cursor: "pointer" }} onClick={() => setVsOpen((v) => !v)}>
                 <div className="sp-panel-title sp-display"><Swords size={17} /> <EditableText tag="span" value={getText("headToHeadTitle")} onSave={(v) => pushSiteText("headToHeadTitle", v)} editable={hostUnlocked} /></div>
@@ -937,6 +1092,7 @@ export default function App() {
                         {syncing ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={12} />} Sync schedule
                       </span>
                     )}
+                    {lastSynced.schedule && <span className="sp-last-synced">Last synced {formatSyncedAt(lastSynced.schedule)}</span>}
                   </div>
                   {syncMsg && <div className="sp-check-msg info" style={{ marginBottom: 10 }}>{syncMsg}</div>}
                   {Object.keys(matchupsByWeek).length === 0 ? (
@@ -998,6 +1154,7 @@ export default function App() {
                       <span className="sp-btn-ghost sp-btn sp-btn-sm" style={{ display: "inline-flex" }} onClick={syncWinPct} disabled={syncingPct}>
                         {syncingPct ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={12} />} Sync win %
                       </span>
+                      {lastSynced.winPct && <span className="sp-last-synced">Last synced {formatSyncedAt(lastSynced.winPct)}</span>}
                     </div>
                   )}
                   {syncPctMsg && <div className="sp-check-msg info" style={{ marginBottom: 10 }}>{syncPctMsg}</div>}
