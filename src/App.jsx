@@ -168,14 +168,13 @@ function textColorFor(hex) {
   return lum > 0.6 ? "#12190F" : "#F5F3EA";
 }
 
-function TeamChip({ abbr, size = "md", overrideBg }) {
+function TeamChip({ abbr, size = "md" }) {
   const team = TEAM_MAP[abbr];
   if (!team) return null;
-  const bg = overrideBg || team.primary;
-  const fg = textColorFor(bg);
+  const fg = textColorFor(team.primary);
   const dims = size === "sm" ? { h: 30, fs: 11, pad: "0 9px" } : { h: 38, fs: 13, pad: "0 12px" };
   return (
-    <span className="team-chip" style={{ background: bg, color: fg, borderColor: overrideBg || team.secondary, height: dims.h, fontSize: dims.fs, padding: dims.pad }} title={`${team.city} ${team.name}`}>
+    <span className="team-chip" style={{ background: team.primary, color: fg, borderColor: team.secondary, height: dims.h, fontSize: dims.fs, padding: dims.pad }} title={`${team.city} ${team.name}`}>
       {abbr}
     </span>
   );
@@ -1020,9 +1019,15 @@ export default function App() {
                                       ) : vp ? (
                                         <>
                                           <span onClick={canEditExisting ? () => setPicker({ memberId: m.id, week: w }) : undefined}
-                                            style={{ cursor: canEditExisting ? "pointer" : "default" }}
+                                            style={{
+                                              cursor: canEditExisting ? "pointer" : "default",
+                                              display: "inline-block",
+                                              borderRadius: "9px",
+                                              outline: vp.result === "win" ? "3px solid #22C55E" : vp.result === "loss" ? "3px solid #EF4444" : "none",
+                                              outlineOffset: vp.result ? "2px" : "0",
+                                            }}
                                             title={pickIsLocked ? "This team has already kicked off — locked" : undefined}>
-                                            <TeamChip abbr={vp.team} size="sm" overrideBg={vp.result === "win" ? "#22C55E" : vp.result === "loss" ? "#EF4444" : undefined} />
+                                            <TeamChip abbr={vp.team} size="sm" />
                                           </span>
                                           {isVs && <Swords size={11} color="var(--gold)" />}
                                           {hostUnlocked && (
