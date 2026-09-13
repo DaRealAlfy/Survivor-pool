@@ -150,6 +150,14 @@ function computeStatus(member, weekPastDeadline) {
   return { lives: Math.max(lives, 0), eliminatedAtWeek, eliminated: eliminatedAtWeek !== null, missedAtWeeks };
 }
 
+function computePct(record) {
+  if (!record) return null;
+  const w = record.w || 0, l = record.l || 0, t = record.t || 0;
+  const total = w + l + t;
+  if (total === 0) return null;
+  return (w + t * 0.5) / total;
+}
+
 function textColorFor(hex) {
   if (!hex) return "#fff";
   const h = hex.replace("#", "");
@@ -160,13 +168,14 @@ function textColorFor(hex) {
   return lum > 0.6 ? "#12190F" : "#F5F3EA";
 }
 
-function TeamChip({ abbr, size = "md" }) {
+function TeamChip({ abbr, size = "md", overrideBg }) {
   const team = TEAM_MAP[abbr];
   if (!team) return null;
-  const fg = textColorFor(team.primary);
+  const bg = overrideBg || team.primary;
+  const fg = textColorFor(bg);
   const dims = size === "sm" ? { h: 30, fs: 11, pad: "0 9px" } : { h: 38, fs: 13, pad: "0 12px" };
   return (
-    <span className="team-chip" style={{ background: team.primary, color: fg, borderColor: team.secondary, height: dims.h, fontSize: dims.fs, padding: dims.pad }} title={`${team.city} ${team.name}`}>
+    <span className="team-chip" style={{ background: bg, color: fg, borderColor: overrideBg || team.secondary, height: dims.h, fontSize: dims.fs, padding: dims.pad }} title={`${team.city} ${team.name}`}>
       {abbr}
     </span>
   );
@@ -180,7 +189,7 @@ export default function App() {
   const [siteText, setSiteText] = useState({});
   const [lastSynced, setLastSynced] = useState({});
   const [themeKey, setThemeKey] = useState("turf");
-  const [membersOpen, setMembersOpen] = useState(true);
+  const [membersOpen, setMembersOpen] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [poolLoaded, setPoolLoaded] = useState(false);
   const [user, setUser] = useState(null);
@@ -448,8 +457,11 @@ export default function App() {
       })
     );
   }
-  function setWinPct(abbr, val) {
-    pushTeamStats({ ...teamStats, [abbr]: val });
+  function updateRecord(abbr, field, value) {
+    if (!hostUnlocked) return;
+    const current = teamStats[abbr] || {};
+    const num = value === "" ? 0 : Math.max(0, Math.round(Number(value)) || 0);
+    pushTeamStats({ ...teamStats, [abbr]: { ...current, [field]: num } });
   }
 
   const statuses = useMemo(() => {
@@ -489,9 +501,9 @@ export default function App() {
   const boldestPickers = useMemo(() => {
     const rows = members.map((m) => {
       const visiblePicks = WEEKS.map((w) => getVisiblePick(m, w)).filter((p) => p && p !== "hidden");
-      const withPct = visiblePicks.filter((p) => typeof teamStats[p.team] === "number");
+      const withPct = visiblePicks.filter((p) => computePct(teamStats[p.team]) !== null);
       if (withPct.length === 0) return { id: m.id, name: m.name, avg: null };
-      const avg = withPct.reduce((s, p) => s + teamStats[p.team], 0) / withPct.length;
+      const avg = withPct.reduce((s, p) => s + computePct(teamStats[p.team]), 0) / withPct.length;
       return { id: m.id, name: m.name, avg };
     });
     return rows.filter((r) => r.avg !== null).sort((a, b) => a.avg - b.avg);
@@ -630,17 +642,11 @@ export default function App() {
           const abbr = entry.team?.abbreviation;
           if (!abbr) continue;
           const stats = entry.stats || [];
-          let pct = stats.find((s) => s.name === "winPercent" || s.abbreviation === "PCT")?.value;
-          if (typeof pct !== "number") {
-            const wins = stats.find((s) => s.name === "wins")?.value;
-            const losses = stats.find((s) => s.name === "losses")?.value;
-            const ties = stats.find((s) => s.name === "ties")?.value || 0;
-            if (typeof wins === "number" && typeof losses === "number" && wins + losses + ties > 0) {
-              pct = (wins + ties * 0.5) / (wins + losses + ties);
-            }
-          }
-          if (typeof pct === "number") {
-            next[abbr] = pct;
+          const wins = stats.find((s) => s.name === "wins")?.value;
+          const losses = stats.find((s) => s.name === "losses")?.value;
+          const ties = stats.find((s) => s.name === "ties")?.value || 0;
+          if (typeof wins === "number" && typeof losses === "number") {
+            next[abbr] = { w: wins, l: losses, t: ties };
             updated += 1;
           }
         }
@@ -650,7 +656,7 @@ export default function App() {
       } else {
         pushTeamStats(next);
         pushLastSynced("winPct", Date.now());
-        setSyncPctMsg(`Synced win % for ${updated} teams. Early in the season these may still be 0-0 for everyone.`);
+        setSyncPctMsg(`Synced records for ${updated} teams. Early in the season these may still be 0-0 for everyone.`);
       }
     } catch (e) {
       setSyncPctMsg("Couldn't reach standings from here — try again later, or enter them manually below.");
@@ -786,10 +792,11 @@ export default function App() {
         .sp-vs-row { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px; font-size: 13.5px; }
         .sp-vs-row:last-child { margin-bottom: 0; }
         .sp-vs-name { font-weight: 600; }
-        .sp-pct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
-        .sp-pct-item { display: flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
-        .sp-pct-input { width: 52px; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; color: var(--text); font-family: inherit; font-size: 12.5px; padding: 3px 5px; text-align: right; }
+        .sp-pct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin-top: 12px; }
+        .sp-pct-item { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+        .sp-pct-input { width: 40px; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; color: var(--text); font-family: inherit; font-size: 12.5px; padding: 3px 5px; text-align: right; }
         .sp-pct-input:disabled { opacity: 0.5; }
+        .sp-pct-readout { font-size: 11px; color: var(--gold); margin-left: auto; font-family: 'Oswald', sans-serif; font-weight: 600; }
         .sp-modal-backdrop { position: fixed; inset: 0; background: rgba(6,12,9,0.72); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
         .sp-modal { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; width: 100%; max-width: 620px; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }
         .sp-modal.sp-modal-narrow { max-width: 380px; }
@@ -1013,9 +1020,9 @@ export default function App() {
                                       ) : vp ? (
                                         <>
                                           <span onClick={canEditExisting ? () => setPicker({ memberId: m.id, week: w }) : undefined}
-                                            style={{ cursor: canEditExisting ? "pointer" : "default", opacity: vp.result === "loss" ? 0.55 : 1, filter: vp.result === "loss" ? "grayscale(0.4)" : "none" }}
+                                            style={{ cursor: canEditExisting ? "pointer" : "default" }}
                                             title={pickIsLocked ? "This team has already kicked off — locked" : undefined}>
-                                            <TeamChip abbr={vp.team} size="sm" />
+                                            <TeamChip abbr={vp.team} size="sm" overrideBg={vp.result === "win" ? "#22C55E" : vp.result === "loss" ? "#EF4444" : undefined} />
                                           </span>
                                           {isVs && <Swords size={11} color="var(--gold)" />}
                                           {hostUnlocked && (
@@ -1158,21 +1165,23 @@ export default function App() {
                     </div>
                   )}
                   {syncPctMsg && <div className="sp-check-msg info" style={{ marginBottom: 10 }}>{syncPctMsg}</div>}
+                  <div className="sp-sub" style={{ marginBottom: 10 }}>Enter each team's win-loss record — the percentage is calculated for you.</div>
                   <div className="sp-pct-grid">
-                  {TEAMS.map((t) => (
-                    <div className="sp-pct-item" key={t.abbr}>
-                      <TeamChip abbr={t.abbr} size="sm" />
-                      <input className="sp-pct-input" type="number" min="0" max="100" placeholder="—" disabled={!hostUnlocked}
-                        value={typeof teamStats[t.abbr] === "number" ? Math.round(teamStats[t.abbr] * 100) : ""}
-                        onChange={(e) => {
-                          if (!hostUnlocked) return;
-                          const v = e.target.value;
-                          if (v === "") { const n = { ...teamStats }; delete n[t.abbr]; pushTeamStats(n); }
-                          else setWinPct(t.abbr, Math.max(0, Math.min(100, Number(v))) / 100);
-                        }} />
-                      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>%</span>
-                    </div>
-                  ))}
+                  {TEAMS.map((t) => {
+                    const rec = teamStats[t.abbr];
+                    const pct = computePct(rec);
+                    return (
+                      <div className="sp-pct-item" key={t.abbr}>
+                        <TeamChip abbr={t.abbr} size="sm" />
+                        <input className="sp-pct-input" type="number" min="0" placeholder="W" disabled={!hostUnlocked}
+                          value={rec?.w ?? ""} onChange={(e) => updateRecord(t.abbr, "w", e.target.value)} />
+                        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>-</span>
+                        <input className="sp-pct-input" type="number" min="0" placeholder="L" disabled={!hostUnlocked}
+                          value={rec?.l ?? ""} onChange={(e) => updateRecord(t.abbr, "l", e.target.value)} />
+                        {pct !== null && <span className="sp-pct-readout">{Math.round(pct * 100)}%</span>}
+                      </div>
+                    );
+                  })}
                 </div>
                 </>
               )}
