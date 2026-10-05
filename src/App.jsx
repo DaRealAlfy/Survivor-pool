@@ -21,6 +21,8 @@ function weekLockTimestamp(week) {
   const sundayUTCms = SEASON_WEEK1_SUNDAY_UTC + (week - 1) * 7 * 24 * 3600 * 1000;
   const offsetHours = sundayUTCms >= DST_END_UTC_2026 ? 5 : 4;
   return sundayUTCms + (13 + offsetHours) * 3600 * 1000;
+  // Monday 8:25 PM ET
+  return sundayUTCms + (24 + 20 + offsetHours) * 3600 * 1000 + 25 * 60 * 1000;
 }
 function isWeekLockedByTime(week) {
   return Date.now() >= weekLockTimestamp(week);
